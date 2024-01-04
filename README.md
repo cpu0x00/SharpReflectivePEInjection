@@ -1,5 +1,9 @@
 # SharpReflectivePEInjection #
 
+**Update: fixed x32 loading issue and till now syscalls are not working with x32 applications**
+
+thanks to <a href=https://github.com/MexHigh>MexHigh</a> for telling me about this bug way back in november
+
 ```
 C:\> SharpReflectivePEInjection.exe -h
 
